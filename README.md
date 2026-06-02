@@ -6,7 +6,7 @@
 
 ### **部署与使用说明**
 
--- 1.  部署到 Cloudflare Workers:
+1.  部署到 Cloudflare Workers:
     登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)，进入 Workers & Pages。
     点击 创建应用程序 -> 创建 Worker。
     将上述完整的 `_worker.js` 代码复制粘贴到在线编辑器中，替换默认内容。
