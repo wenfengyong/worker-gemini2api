@@ -5,7 +5,7 @@
 
 const CONFIG = {
   PROJECT_NAME: 'gemini-web2api',
-  PROJECT_VERSION: '2.0.1',
+  PROJECT_VERSION: '2.0.2',
   UPSTREAM_BASE_URL: 'https://gemini.google.com',
   UPSTREAM_PATH: '/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate',
   GEMINI_BL: 'boq_assistant-bard-web-server_20260525.09_p0',
@@ -46,7 +46,6 @@ function loadConfigFromEnv(env) {
           k === 'API_MASTER_KEY') {
         CONFIG[k] = env[k];
       } else {
-        // Numeric / boolean fields
         if (env[k] === 'false' || env[k] === '0') CONFIG[k] = false;
         else if (env[k] === 'true' || env[k] === '1') CONFIG[k] = true;
         else if (!isNaN(env[k]) && env[k] !== '') CONFIG[k] = Number(env[k]);
@@ -55,7 +54,6 @@ function loadConfigFromEnv(env) {
     }
   });
   if (!CONFIG.API_MASTER_KEY || CONFIG.API_MASTER_KEY === '') {
-    console.warn('Warning: API_MASTER_KEY not set. Using default key.');
     CONFIG.API_MASTER_KEY = 'sk-gemini-web2api-key';
   }
 }
@@ -141,32 +139,41 @@ function cleanText(text) {
   return text.trim();
 }
 
+function extractTextsFromLine(line) {
+  if (!line.includes('"wrb.fr"') || line.length < 200) return [];
+  try {
+    const arr = JSON.parse(line);
+    const innerStr = arr[0]?.[2];
+    if (!innerStr || innerStr.length < 50) return [];
+    const inner = JSON.parse(innerStr);
+    if (!Array.isArray(inner) || inner.length <= 4 || !inner[4]) return [];
+    const texts = [];
+    for (const part of inner[4]) {
+      if (Array.isArray(part) && part.length > 1 && part[1] && Array.isArray(part[1])) {
+        for (const t of part[1]) {
+          if (typeof t === 'string' && t) texts.push(t);
+        }
+      }
+    }
+    return texts;
+  } catch (e) {
+    return [];
+  }
+}
+
 function parseGeminiStreamChunk(chunk, prevFullText) {
   const deltas = [];
   let current = prevFullText;
   const lines = chunk.split('\n');
   for (const line of lines) {
-    if (!line.includes('"wrb.fr"') || line.length < 200) continue;
-    try {
-      const arr = JSON.parse(line);
-      const innerStr = arr[0]?.[2];
-      if (!innerStr || innerStr.length < 50) continue;
-      const inner = JSON.parse(innerStr);
-      if (Array.isArray(inner) && inner[4]) {
-        for (const part of inner[4]) {
-          if (Array.isArray(part) && part[1] && Array.isArray(part[1])) {
-            for (const t of part[1]) {
-              if (typeof t === 'string' && t.length > current.length) {
-                let delta = t.slice(current.length);
-                delta = cleanText(delta);
-                if (delta) deltas.push(delta);
-                current = t;
-              }
-            }
-          }
-        }
+    for (const t of extractTextsFromLine(line)) {
+      if (t.length > current.length) {
+        let delta = t.slice(current.length);
+        delta = cleanText(delta);
+        if (delta) deltas.push(delta);
+        current = t;
       }
-    } catch (e) {}
+    }
   }
   return { deltas, newFullText: current };
 }
@@ -203,16 +210,19 @@ function messagesToPrompt(messages, tools = null, toolChoice = null) {
         description: fn.description || t.description || '',
         parameters: fn.parameters || t.parameters || {},
       };
-    });
-    const constraint = buildToolChoiceInstruction(toolChoice, toolDefs);
-    parts.push(
-      '# Tool Use\n\n' +
-      'You can call the following tools. Call format:\n' +
-      '```tool_call\n{"name": "func_name", "arguments": {...}}\n```\n' +
-      'When calling tools, output ONLY the tool_call block(s).\n\n' +
-      `Available tools:\n${JSON.stringify(toolDefs, null, 2)}` +
-      constraint
-    );
+    }).filter(td => td.name);
+
+    if (toolDefs.length) {
+      const constraint = buildToolChoiceInstruction(toolChoice, toolDefs);
+      parts.push(
+        '# Tool Use\n\n' +
+        'You can call the following tools. Call format:\n' +
+        '```tool_call\n{"name": "func_name", "arguments": {...}}\n```\n' +
+        'When calling tools, output ONLY the tool_call block(s).\n\n' +
+        'Available tools:\n' + JSON.stringify(toolDefs, null, 2) +
+        constraint
+      );
+    }
   }
 
   for (const msg of messages) {
@@ -221,11 +231,15 @@ function messagesToPrompt(messages, tools = null, toolChoice = null) {
 
     // Handle array content (multimodal)
     if (Array.isArray(content)) {
-      content = content
-        .filter(c => c.type === 'text' || c.type === 'input_text')
-        .map(c => c.text || '')
-        .filter(t => t)
-        .join(' ');
+      const textParts = [];
+      for (const c of content) {
+        if (c.type === 'text' || c.type === 'input_text') {
+          textParts.push(c.text || '');
+        } else if (c.type === 'image_url' || c.type === 'image') {
+          textParts.push('[Note: Image input not supported in this API. Please describe the image in text.]');
+        }
+      }
+      content = textParts.join(' ');
     }
 
     if (role === 'system') {
@@ -234,14 +248,16 @@ function messagesToPrompt(messages, tools = null, toolChoice = null) {
       if (msg.tool_calls && msg.tool_calls.length > 0) {
         const tcStrs = msg.tool_calls.map(tc => {
           const fn = tc.function || {};
-          return '```tool_call\n' + JSON.stringify({ name: fn.name, arguments: JSON.parse(fn.arguments || '{}') }) + '\n```';
+          // arguments is already a JSON string in OpenAI format, use directly
+          const args = fn.arguments || '{}';
+          return '```tool_call\n{"name": "' + (fn.name || '') + '", "arguments": ' + args + '}\n```';
         });
         parts.push(`[Assistant]: ${content || ''}\n` + tcStrs.join('\n'));
       } else {
         parts.push(`[Assistant]: ${content}`);
       }
     } else if (role === 'tool') {
-      parts.push(`[Tool result for ${msg.name || msg.tool_call_id || ''}]: ${content}`);
+      parts.push(`[Tool result for ${msg.name || ''}]: ${content}`);
     } else {
       parts.push(content || '');
     }
@@ -255,50 +271,68 @@ function messagesToPrompt(messages, tools = null, toolChoice = null) {
 function parseToolCalls(text) {
   const toolCalls = [];
   const pattern = /```tool_call\s*\n(.*?)\n```/gs;
-  let cleanText = text;
-  let match;
-  while ((match = pattern.exec(text)) !== null) {
+  const cleanParts = [];
+  let lastEnd = 0;
+
+  for (const match of text.matchAll(pattern)) {
+    cleanParts.push(text.slice(lastEnd, match.index));
+    lastEnd = match.index + match[0].length;
     try {
       const data = JSON.parse(match[1].trim());
-      toolCalls.push({
-        id: `call_${crypto.randomUUID().slice(0, 8)}`,
-        type: 'function',
-        function: {
-          name: data.name,
-          arguments: JSON.stringify(data.arguments || data.args || {}, null, 2),
-        },
-      });
+      if (data.name) {
+        toolCalls.push({
+          id: `call_${crypto.randomUUID().slice(0, 8)}`,
+          type: 'function',
+          function: {
+            name: data.name,
+            arguments: JSON.stringify(data.arguments || data.args || {}),
+          },
+        });
+      }
     } catch (e) {}
   }
-  cleanText = cleanText.replace(pattern, '').trim();
-  return { cleanText, toolCalls };
+  cleanParts.push(text.slice(lastEnd));
+  const clean = cleanParts.join('').trim();
+  return { cleanText: clean, toolCalls };
 }
 
 // ─── Parse Google Function Calls ──────────────────────────────────────────────
 
 function parseGoogleFunctionCalls(text) {
   const functionCalls = [];
-  const pattern1 = /```function_call\s*\n(.*?)\n```/gs;
-  const pattern2 = /(?:^|\n)function_call\s*\n(\{[^`]*?\})/g;
   let clean = text;
 
-  for (const pattern of [pattern1, pattern2]) {
-    let match;
-    while ((match = pattern.exec(clean)) !== null) {
-      try {
-        const data = JSON.parse(match[1].trim());
-        if (data.name) {
-          functionCalls.push({
-            name: data.name,
-            args: data.args || data.arguments || {},
-          });
-        }
-      } catch (e) {}
-    }
-    clean = clean.replace(pattern, '').trim();
+  // Pattern 1: ```function_call\n{...}\n```
+  const pattern1 = /```function_call\s*\n(.*?)\n```/gs;
+  for (const match of clean.matchAll(pattern1)) {
+    try {
+      const data = JSON.parse(match[1].trim());
+      if (data.name) {
+        functionCalls.push({
+          name: data.name,
+          args: data.args || data.arguments || {},
+        });
+      }
+    } catch (e) {}
   }
+  clean = clean.replace(pattern1, '').trim();
 
-  // Try raw JSON with name + args
+  // Pattern 2: function_call\n{...} (without backticks)
+  const pattern2 = /(?:^|\n)function_call\s*\n(\{[^`]*?\})/g;
+  for (const match of clean.matchAll(pattern2)) {
+    try {
+      const data = JSON.parse(match[1].trim());
+      if (data.name) {
+        functionCalls.push({
+          name: data.name,
+          args: data.args || data.arguments || {},
+        });
+      }
+    } catch (e) {}
+  }
+  clean = clean.replace(pattern2, '').trim();
+
+  // Pattern 3: Raw JSON with name + args
   if (!functionCalls.length && clean.trim().startsWith('{')) {
     try {
       const data = JSON.parse(clean.trim());
@@ -328,7 +362,7 @@ function buildGoogleToolPrompt(toolDefs) {
     '- Output ONLY the function_call block(s), nothing else\n' +
     '- You may call multiple tools with multiple blocks\n' +
     '- After receiving a [Tool result for ...], use that data to answer the user\n\n' +
-    `Available tools:\n${toolSpec}`
+    'Available tools:\n' + toolSpec
   );
 }
 
@@ -413,7 +447,7 @@ function googleContentsToPrompt(req) {
 function resolveModel(modelName) {
   let thinkOverride = null;
   let name = modelName;
-  if (name.includes('@think=')) {
+  if (name && name.includes('@think=')) {
     const parts = name.split('@think=');
     name = parts[0];
     thinkOverride = parseInt(parts[1], 10);
@@ -421,7 +455,6 @@ function resolveModel(modelName) {
   }
   const cfg = MODELS[name];
   if (!cfg) {
-    // Fallback to default
     const defaultCfg = MODELS[CONFIG.DEFAULT_MODEL];
     return {
       modelName: CONFIG.DEFAULT_MODEL,
@@ -459,8 +492,14 @@ async function callGeminiWithRetry(prompt, modelId, thinkMode, traceId) {
       clearTimeout(timeout);
       if (!resp.ok) throw new Error(`Upstream error: ${resp.status} ${resp.statusText}`);
       const raw = await resp.text();
-      const parsed = parseGeminiStreamChunk(raw, '');
-      return { text: parsed.newFullText, raw };
+      // Parse full response to get final text
+      let lastText = '';
+      for (const line of raw.split('\n')) {
+        for (const t of extractTextsFromLine(line)) {
+          if (t.length > lastText.length) lastText = t;
+        }
+      }
+      return { text: cleanText(lastText), raw };
     } catch (e) {
       lastErr = e;
       if (attempt < CONFIG.RETRY_ATTEMPTS - 1) {
@@ -475,22 +514,17 @@ async function callGeminiWithRetry(prompt, modelId, thinkMode, traceId) {
 async function callGeminiStream(prompt, modelId, thinkMode, traceId) {
   const body = buildGeminiRequestBody(prompt, modelId, thinkMode);
   const url = buildUpstreamUrl();
-  try {
-    const headers = await buildGeminiRequestHeaders();
-    headers['X-Request-ID'] = traceId;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), CONFIG.REQUEST_TIMEOUT_MS);
-    const resp = await fetch(url, {
-      method: 'POST', headers, body, signal: controller.signal,
-      cf: { httpVersion: '3' },
-    });
-    clearTimeout(timeout);
-    if (!resp.ok) throw new Error(`Upstream error: ${resp.status} ${resp.statusText}`);
-    return resp.body;
-  } catch (e) {
-    console.error(`[${traceId}] Stream upstream failed:`, e);
-    throw e;
-  }
+  const headers = await buildGeminiRequestHeaders();
+  headers['X-Request-ID'] = traceId;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CONFIG.REQUEST_TIMEOUT_MS);
+  const resp = await fetch(url, {
+    method: 'POST', headers, body, signal: controller.signal,
+    cf: { httpVersion: '3' },
+  });
+  clearTimeout(timeout);
+  if (!resp.ok) throw new Error(`Upstream error: ${resp.status} ${resp.statusText}`);
+  return resp.body;
 }
 
 // ─── JSON Response Helper ─────────────────────────────────────────────────────
@@ -506,33 +540,43 @@ function jsonResponse(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data, null, 2), { status, headers });
 }
 
+// ─── CORS Preflight ───────────────────────────────────────────────────────────
+
+function handleCorsPreflight() {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': '*',
+      'Access-Control-Max-Age': '86400',
+    },
+  });
+}
+
+// ─── Auth Check ───────────────────────────────────────────────────────────────
+
+function checkAuth(request) {
+  const keys = CONFIG.API_MASTER_KEY ? [CONFIG.API_MASTER_KEY] : [];
+  if (!keys.length || keys[0] === '') return true;
+  const authHeader = request.headers.get('Authorization') || '';
+  const apiKey = authHeader ? authHeader.replace(/^Bearer\s+/i, '') : request.headers.get('x-api-key');
+  return keys.includes(apiKey);
+}
+
 // ─── API Route Handler ────────────────────────────────────────────────────────
 
 async function handleApiRequest(request, pathname, traceId, executionCtx, env) {
-  // Auth check
-  const authHeader = request.headers.get('Authorization') || '';
-  const apiKey = authHeader ? authHeader.replace(/^Bearer\s+/i, '') : request.headers.get('x-api-key');
-  if (apiKey !== CONFIG.API_MASTER_KEY) {
+  // Auth check for /v1/ routes only (matching Python behavior: /v1beta/ does NOT require auth)
+  if (pathname.startsWith('/v1/') && !checkAuth(request)) {
     return jsonResponse({ error: { message: 'invalid api key' } }, 401, { 'X-Worker-Trace-ID': traceId });
-  }
-
-  // Cache for model list
-  if (request.method === 'GET' && pathname === '/v1/models') {
-    const cache = caches.default;
-    const cacheKey = new Request(request.url + '#models', request);
-    let cached = await cache.match(cacheKey);
-    if (cached) {
-      const newHeaders = new Headers(cached.headers);
-      newHeaders.set('X-Worker-Trace-ID', traceId);
-      return new Response(cached.body, { ...cached, headers: newHeaders });
-    }
   }
 
   const method = request.method;
 
   // ─── GET /v1/models ───
   if (method === 'GET' && pathname === '/v1/models') {
-    return handleListModels(traceId, apiKey, request, executionCtx);
+    return handleListModels(traceId, request, executionCtx);
   }
 
   // ─── GET /v1beta/models ───
@@ -570,18 +614,12 @@ async function handleApiRequest(request, pathname, traceId, executionCtx, env) {
 
 // ─── GET /v1/models ───────────────────────────────────────────────────────────
 
-async function handleListModels(traceId, apiKey, request, executionCtx) {
+async function handleListModels(traceId, request, executionCtx) {
   const data = Object.entries(MODELS).map(([name, cfg]) => ({
     id: name, object: 'model', created: 1700000000, owned_by: 'google',
-    description: cfg.desc_zh || cfg.desc,
+    description: cfg.desc,
   }));
-  const resp = jsonResponse({ object: 'list', data }, 200, { 'X-Worker-Trace-ID': traceId });
-  if (executionCtx) {
-    const cache = caches.default;
-    const cacheKey = new Request(request.url + '#models', request);
-    executionCtx.waitUntil(cache.put(cacheKey, resp.clone()));
-  }
-  return resp;
+  return jsonResponse({ object: 'list', data }, 200, { 'X-Worker-Trace-ID': traceId });
 }
 
 // ─── GET /v1beta/models ───────────────────────────────────────────────────────
@@ -622,13 +660,13 @@ async function handleChatCompletions(request, traceId, executionCtx) {
 
   // Streaming without tools, or tools disabled
   if (stream && (!tools || toolChoice === 'none')) {
-    return handleChatStreaming(prompt, model, cid, traceId, startTime, executionCtx);
+    return handleChatStreaming(prompt, model, cid, traceId, startTime);
   }
 
   // Non-streaming (or streaming with tools - we need full text for tool parsing)
   try {
     const result = await callGeminiWithRetry(prompt, model.mode, model.think, traceId);
-    let text = cleanText(result.text);
+    let text = result.text;
     let toolCalls = null;
 
     if (tools && text && toolChoice !== 'none') {
@@ -660,6 +698,7 @@ async function handleChatCompletions(request, traceId, executionCtx) {
         headers: {
           'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache',
           'X-Worker-Trace-ID': traceId, 'Connection': 'keep-alive',
+          'Access-Control-Allow-Origin': '*',
         },
       });
     }
@@ -682,7 +721,7 @@ async function handleChatCompletions(request, traceId, executionCtx) {
 
 // ─── Chat Streaming (no tools) ────────────────────────────────────────────────
 
-async function handleChatStreaming(prompt, model, cid, traceId, startTime, executionCtx) {
+async function handleChatStreaming(prompt, model, cid, traceId, startTime) {
   const encoder = new TextEncoder();
   const body = new ReadableStream({
     async start(controller) {
@@ -734,6 +773,7 @@ async function handleChatStreaming(prompt, model, cid, traceId, startTime, execu
     headers: {
       'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache',
       'X-Worker-Trace-ID': traceId, 'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
     },
   });
 }
@@ -831,7 +871,7 @@ async function handleResponses(request, traceId, executionCtx) {
 
   try {
     const result = await callGeminiWithRetry(prompt, model.mode, model.think, traceId);
-    let text = cleanText(result.text);
+    let text = result.text;
     let toolCalls = null;
 
     if (normalizedTools && text && toolChoice !== 'none') {
@@ -1003,7 +1043,7 @@ async function handleGoogleGenerate(request, pathname, traceId, stream) {
   // Non-streaming (or streaming with tools)
   try {
     const result = await callGeminiWithRetry(prompt, model.mode, model.think, traceId);
-    let text = cleanText(result.text);
+    let text = result.text;
     if (!text) text = '';
 
     const responseParts = [];
@@ -1076,9 +1116,9 @@ function generateDashboardHTML() {
   ).join('\n');
 
   const modelCards = Object.entries(MODELS).map(([name, cfg]) => `
-    <div class="bg-gray-800 p-4 rounded border border-gray-700">
-      <h3 class="text-amber-400 font-semibold mb-1">${name}</h3>
-      <p class="text-gray-400 text-sm">${cfg.desc_zh || cfg.desc}</p>
+    <div style="background:#1e1e1e;padding:0.75rem;border-radius:6px;border:1px solid #333">
+      <div style="color:#ffbf00;font-weight:600;margin-bottom:2px">${name}</div>
+      <div style="color:#999;font-size:0.8rem">${cfg.desc_zh || cfg.desc}</div>
     </div>
   `).join('\n');
 
@@ -1090,69 +1130,57 @@ function generateDashboardHTML() {
   <title>${CONFIG.PROJECT_NAME} - 开发者驾驶舱</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: 'Mono', 'SF Mono', 'Cascadia Code', 'Consolas', monospace; background: #121212; color: #e0e0e0; line-height: 1.6; overflow-x: hidden; }
-    .container { max-width: 1200px; margin: 0 auto; padding: 1rem; }
-    header { background: #1e1e1e; border-bottom: 1px solid #333; padding: 1rem 0; }
-    .header-inner { display: flex; justify-content: space-between; align-items: center; max-width: 1200px; margin: 0 auto; padding: 0 1rem; }
-    .logo { font-size: 1.5rem; font-weight: bold; color: #ffbf00; }
-    .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-    .healthy { background: #10b981; }
-    .unhealthy { background: #ef4444; }
-    .checking { background: #f59e0b; animation: pulse 1.5s infinite; }
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-    .card { background: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 1.5rem; margin-bottom: 1rem; }
-    .card h2 { color: #ffbf00; font-size: 1.1rem; margin-bottom: 0.75rem; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1rem; }
-    input, select, textarea, button { font-family: inherit; font-size: 0.9rem; }
-    input, select, textarea { background: #222; border: 1px solid #444; color: #ccc; padding: 0.5rem; border-radius: 4px; width: 100%; }
-    button { background: #ffbf00; color: #000; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; font-weight: 600; }
-    button:hover { background: #e6ac00; }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
-    .terminal { background: #0a0a0a; border: 1px solid #333; border-radius: 8px; padding: 1rem; min-height: 300px; max-height: 500px; overflow-y: auto; font-size: 0.85rem; white-space: pre-wrap; word-break: break-all; }
-    .terminal::-webkit-scrollbar { width: 6px; }
-    .terminal::-webkit-scrollbar-thumb { background: #555; border-radius: 3px; }
-    .user-msg { color: #10b981; }
-    .assistant-msg { color: #e0e0e0; }
-    .error-msg { color: #ef4444; }
-    .info { color: #aaa; font-size: 0.8rem; margin-top: 0.5rem; }
-    footer { text-align: center; padding: 2rem 0; color: #666; font-size: 0.8rem; }
-    a { color: #ffbf00; text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    .input-row { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }
-    .input-row select { width: auto; min-width: 200px; }
-    .input-row input { flex: 1; }
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Mono','SF Mono','Cascadia Code','Consolas',monospace;background:#121212;color:#e0e0e0;line-height:1.6}
+    .container{max-width:1100px;margin:0 auto;padding:1rem}
+    header{background:#1e1e1e;border-bottom:1px solid #333;padding:1rem}
+    .header-inner{display:flex;justify-content:space-between;align-items:center;max-width:1100px;margin:0 auto;padding:0 1rem}
+    .logo{font-size:1.4rem;font-weight:bold;color:#ffbf00}
+    .status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+    .healthy{background:#10b981}.unhealthy{background:#ef4444}
+    .checking{background:#f59e0b;animation:pulse 1.5s infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+    .card{background:#1e1e1e;border:1px solid #333;border-radius:8px;padding:1.25rem;margin-bottom:1rem}
+    .card h2{color:#ffbf00;font-size:1rem;margin-bottom:.75rem}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:.75rem}
+    input,select,textarea,button{font-family:inherit;font-size:.85rem}
+    input,select,textarea{background:#222;border:1px solid #444;color:#ccc;padding:.4rem .6rem;border-radius:4px;width:100%}
+    button{background:#ffbf00;color:#000;border:none;padding:.4rem .8rem;border-radius:4px;cursor:pointer;font-weight:600}
+    button:hover{background:#e6ac00}button:disabled{opacity:.5;cursor:not-allowed}
+    .terminal{background:#0a0a0a;border:1px solid #333;border-radius:8px;padding:1rem;min-height:280px;max-height:480px;overflow-y:auto;font-size:.82rem;white-space:pre-wrap;word-break:break-all}
+    .terminal::-webkit-scrollbar{width:6px}.terminal::-webkit-scrollbar-thumb{background:#555;border-radius:3px}
+    .user-msg{color:#10b981}.assistant-msg{color:#e0e0e0}.error-msg{color:#ef4444}
+    .info{color:#888;font-size:.78rem;margin-top:.4rem}
+    footer{text-align:center;padding:1.5rem 0;color:#666;font-size:.78rem}
+    a{color:#ffbf00;text-decoration:none}a:hover{text-decoration:underline}
+    .input-row{display:flex;gap:.5rem;margin-bottom:.5rem}
+    .input-row select{width:auto;min-width:180px}.input-row input{flex:1}
   </style>
 </head>
 <body>
   <header>
     <div class="header-inner">
-      <div class="logo"><i class="fas fa-rocket"></i> ${CONFIG.PROJECT_NAME} <span style="font-size:0.8rem;color:#aaa">v${CONFIG.PROJECT_VERSION}</span></div>
-      <div><span class="status-dot checking" id="health-dot"></span><span id="health-text" style="font-size:0.85rem">检查中...</span></div>
+      <div class="logo"><i class="fas fa-rocket"></i> ${CONFIG.PROJECT_NAME} <span style="font-size:.75rem;color:#aaa">v${CONFIG.PROJECT_VERSION}</span></div>
+      <div><span class="status-dot checking" id="health-dot"></span><span id="health-text" style="font-size:.82rem">检查中...</span></div>
     </div>
   </header>
-
   <div class="container">
     <div class="grid">
       <div class="card">
         <h2><i class="fas fa-key"></i> API 配置</h2>
-        <label style="display:block;margin-bottom:0.5rem;color:#aaa;font-size:0.85rem">API 密钥</label>
+        <label style="display:block;margin-bottom:.4rem;color:#aaa;font-size:.82rem">API 密钥</label>
         <div class="input-row">
           <input type="password" id="api-key" placeholder="输入您的 API 密钥">
           <button onclick="toggleKeyVisibility()" style="width:auto"><i class="fas fa-eye"></i></button>
           <button onclick="saveKey()" style="width:auto"><i class="fas fa-save"></i></button>
         </div>
-        <div class="info">API Base URL: <code id="api-url">${CONFIG.PROJECT_NAME}</code></div>
+        <div class="info">API Base URL: <code id="api-url"></code></div>
       </div>
-
       <div class="card">
         <h2><i class="fas fa-list"></i> 可用模型</h2>
-        <div class="grid" style="gap:0.5rem">
-          ${modelCards}
-        </div>
+        <div class="grid" style="gap:.5rem">${modelCards}</div>
       </div>
     </div>
-
     <div class="card">
       <h2><i class="fas fa-terminal"></i> 实时交互终端</h2>
       <div class="input-row">
@@ -1163,119 +1191,45 @@ function generateDashboardHTML() {
       <div class="terminal" id="output-area"></div>
     </div>
   </div>
-
   <footer>
-    <p>${CONFIG.PROJECT_NAME} v${CONFIG.PROJECT_VERSION} | <a href="https://github.com" target="_blank">GitHub</a></p>
-    <p class="info" style="margin-top:0.5rem">注意: 此服务依赖于第三方公开接口，请合理使用。</p>
+    <p>${CONFIG.PROJECT_NAME} v${CONFIG.PROJECT_VERSION} | 注意: 此服务依赖于第三方公开接口，请合理使用。</p>
   </footer>
-
   <script>
     const API_BASE = window.location.origin + '/v1';
     document.getElementById('api-url').textContent = API_BASE;
-
-    // Load saved key
     const savedKey = localStorage.getItem('gemini_api_key');
     if (savedKey) document.getElementById('api-key').value = savedKey;
-
-    function getApiKey() {
-      return document.getElementById('api-key').value.trim() || 'sk-default';
+    function getApiKey(){return document.getElementById('api-key').value.trim()||'sk-default'}
+    function toggleKeyVisibility(){const i=document.getElementById('api-key');i.type=i.type==='password'?'text':'password'}
+    function saveKey(){localStorage.setItem('gemini_api_key',getApiKey())}
+    function addOutput(text,cls){const a=document.getElementById('output-area');a.innerHTML+='<div class="'+cls+'">'+text+'</div>';a.scrollTop=a.scrollHeight}
+    async function sendRequest(){
+      const prompt=document.getElementById('prompt-input').value.trim();
+      if(!prompt)return;
+      const model=document.getElementById('model-select').value;
+      document.getElementById('prompt-input').value='';
+      addOutput('您: '+prompt,'user-msg');
+      const btn=document.getElementById('send-btn');btn.disabled=true;btn.innerHTML='<i class="fas fa-spinner fa-spin"></i> 处理中...';
+      try{
+        const resp=await fetch(API_BASE+'/chat/completions',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+getApiKey()},body:JSON.stringify({model:model,messages:[{role:'user',content:prompt}],stream:true})});
+        if(!resp.ok){const err=await resp.json().catch(()=>({error:{message:resp.statusText}}));addOutput('错误: '+(err.error?.message||JSON.stringify(err)),'error-msg');return}
+        const reader=resp.body.getReader();const decoder=new TextDecoder();let assistantText='';
+        addOutput('','assistant-msg');
+        const msgs=document.getElementById('output-area').getElementsByClassName('assistant-msg');
+        const lastMsg=msgs[msgs.length-1];
+        while(true){const{done,value}=await reader.read();if(done)break;const text=decoder.decode(value);
+          for(const line of text.split('\\n')){if(!line.startsWith('data: ')||line==='data: [DONE]')continue;try{const data=JSON.parse(line.slice(6));const delta=data.choices?.[0]?.delta?.content||'';if(delta){assistantText+=delta;lastMsg.textContent='AI: '+assistantText}}catch(e){}}}
+        if(!assistantText)lastMsg.textContent='AI: (无响应)';
+      }catch(e){addOutput('网络错误: '+e.message,'error-msg')}
+      finally{btn.disabled=false;btn.innerHTML='<i class="fas fa-paper-plane"></i> 发送'}
     }
-
-    function toggleKeyVisibility() {
-      const inp = document.getElementById('api-key');
-      inp.type = inp.type === 'password' ? 'text' : 'password';
+    async function checkHealth(){
+      const dot=document.getElementById('health-dot');const text=document.getElementById('health-text');
+      dot.className='status-dot checking';text.textContent='检查中...';
+      try{const resp=await fetch(API_BASE+'/models',{headers:{'Authorization':'Bearer '+getApiKey()}});dot.className='status-dot '+(resp.ok?'healthy':'unhealthy');text.textContent=resp.ok?'上游正常':'上游异常 ('+resp.status+')'}
+      catch(e){dot.className='status-dot unhealthy';text.textContent='网络错误'}
     }
-
-    function saveKey() {
-      localStorage.setItem('gemini_api_key', getApiKey());
-    }
-
-    function addOutput(text, cls = '') {
-      const area = document.getElementById('output-area');
-      area.innerHTML += '<div class="' + cls + '">' + text + '</div>';
-      area.scrollTop = area.scrollHeight;
-    }
-
-    async function sendRequest() {
-      const prompt = document.getElementById('prompt-input').value.trim();
-      if (!prompt) return;
-      const model = document.getElementById('model-select').value;
-      document.getElementById('prompt-input').value = '';
-      addOutput('您: ' + prompt, 'user-msg');
-
-      const sendBtn = document.getElementById('send-btn');
-      sendBtn.disabled = true;
-      sendBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 处理中...';
-
-      try {
-        const resp = await fetch(API_BASE + '/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer ' + getApiKey(),
-          },
-          body: JSON.stringify({
-            model: model,
-            messages: [{ role: 'user', content: prompt }],
-            stream: true,
-          }),
-        });
-
-        if (!resp.ok) {
-          const err = await resp.json().catch(() => ({ error: { message: resp.statusText } }));
-          addOutput('错误: ' + (err.error?.message || JSON.stringify(err)), 'error-msg');
-          return;
-        }
-
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let assistantText = '';
-        addOutput('', 'assistant-msg');
-        const msgElements = document.getElementById('output-area').getElementsByClassName('assistant-msg');
-        const lastMsg = msgElements[msgElements.length - 1];
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          const text = decoder.decode(value);
-          for (const line of text.split('\\n')) {
-            if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
-            try {
-              const data = JSON.parse(line.slice(6));
-              const delta = data.choices?.[0]?.delta?.content || '';
-              if (delta) {
-                assistantText += delta;
-                lastMsg.textContent = 'AI: ' + assistantText;
-              }
-            } catch (e) {}
-          }
-        }
-        if (!assistantText) lastMsg.textContent = 'AI: (无响应)';
-      } catch (e) {
-        addOutput('网络错误: ' + e.message, 'error-msg');
-      } finally {
-        sendBtn.disabled = false;
-        sendBtn.innerHTML = '<i class="fas fa-paper-plane"></i> 发送';
-      }
-    }
-
-    // Health check
-    async function checkHealth() {
-      const dot = document.getElementById('health-dot');
-      const text = document.getElementById('health-text');
-      dot.className = 'status-dot checking';
-      text.textContent = '检查中...';
-      try {
-        const resp = await fetch(API_BASE + '/models', { headers: { 'Authorization': 'Bearer ' + getApiKey() } });
-        dot.className = 'status-dot ' + (resp.ok ? 'healthy' : 'unhealthy');
-        text.textContent = resp.ok ? '上游正常' : '上游异常 (' + resp.status + ')';
-      } catch (e) {
-        dot.className = 'status-dot unhealthy';
-        text.textContent = '网络错误';
-      }
-    }
-    checkHealth();
-    setInterval(checkHealth, 30000);
+    checkHealth();setInterval(checkHealth,30000);
   </script>
 </body>
 </html>`;
@@ -1292,10 +1246,15 @@ export default {
     const traceHeaders = { 'X-Worker-Trace-ID': traceId };
 
     if (CONFIG.LOG_REQUESTS) {
-      console.log(`[${new Date().toISOString()}] [${traceId}] ${request.method} ${pathname} |auth:${request.headers.get('Authorization') ? 'yes' : 'no'}|`);
+      console.log(`[${new Date().toISOString()}] [${traceId}] ${request.method} ${pathname}`);
     }
 
     try {
+      // CORS preflight - must be handled BEFORE auth check
+      if (request.method === 'OPTIONS') {
+        return handleCorsPreflight();
+      }
+
       // Dashboard
       if (pathname === '/' && request.method === 'GET') {
         return serveDeveloperDashboard(request, traceId);
