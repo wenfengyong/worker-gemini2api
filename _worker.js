@@ -572,10 +572,142 @@ function doGet(pathname, request) {
   }
 
   if (pathname === '/') {
-    return sendJson({ status: 'ok', version: '1.1.0', models: Object.keys(MODELS) }, 200);
+    return serveDashboard();
   }
 
   return sendJson({ error: 'not found' }, 404);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Dashboard HTML
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function serveDashboard() {
+  const modelCards = Object.entries(MODELS).map(([n, c]) =>
+    `<div style="background:#1e1e1e;padding:.75rem;border-radius:6px;border:1px solid #333"><div style="color:#ffbf00;font-weight:600;margin-bottom:2px">${n}</div><div style="color:#999;font-size:.8rem">${c.desc}</div></div>`
+  ).join('\n');
+  const modelOpts = Object.entries(MODELS).map(([n, c]) =>
+    `<option value="${n}">${n} - ${c.desc}</option>`
+  ).join('\n');
+
+  const html = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>gemini-web2api</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Mono','SF Mono','Consolas',monospace;background:#121212;color:#e0e0e0;line-height:1.6}
+.container{max-width:1100px;margin:0 auto;padding:1rem}
+header{background:#1e1e1e;border-bottom:1px solid #333;padding:1rem}
+.header-inner{display:flex;justify-content:space-between;align-items:center;max-width:1100px;margin:0 auto;padding:0 1rem}
+.logo{font-size:1.4rem;font-weight:bold;color:#ffbf00}
+.status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.healthy{background:#10b981}.unhealthy{background:#ef4444}
+.checking{background:#f59e0b;animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.card{background:#1e1e1e;border:1px solid #333;border-radius:8px;padding:1.25rem;margin-bottom:1rem}
+.card h2{color:#ffbf00;font-size:1rem;margin-bottom:.75rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:.75rem}
+input,select,textarea,button{font-family:inherit;font-size:.85rem}
+input,select,textarea{background:#222;border:1px solid #444;color:#ccc;padding:.4rem .6rem;border-radius:4px;width:100%}
+button{background:#ffbf00;color:#000;border:none;padding:.4rem .8rem;border-radius:4px;cursor:pointer;font-weight:600}
+button:hover{background:#e6ac00}button:disabled{opacity:.5;cursor:not-allowed}
+.terminal{background:#0a0a0a;border:1px solid #333;border-radius:8px;padding:1rem;min-height:280px;max-height:480px;overflow-y:auto;font-size:.82rem;white-space:pre-wrap;word-break:break-all}
+.terminal::-webkit-scrollbar{width:6px}.terminal::-webkit-scrollbar-thumb{background:#555;border-radius:3px}
+.user-msg{color:#10b981}.assistant-msg{color:#e0e0e0}.error-msg{color:#ef4444}
+.info{color:#888;font-size:.78rem;margin-top:.4rem}
+footer{text-align:center;padding:1.5rem 0;color:#666;font-size:.78rem}
+a{color:#ffbf00;text-decoration:none}a:hover{text-decoration:underline}
+.input-row{display:flex;gap:.5rem;margin-bottom:.5rem}
+.input-row select{width:auto;min-width:180px}.input-row input{flex:1}
+.ep{background:#222;border:1px solid #333;border-radius:6px;padding:.6rem .8rem;margin-bottom:.4rem;font-size:.82rem}
+.ep code{color:#ffbf00}.ep .method{color:#10b981;font-weight:600;margin-right:.5rem}
+</style>
+</head>
+<body>
+<header><div class="header-inner">
+<div class="logo"><i class="fas fa-rocket"></i> gemini-web2api</div>
+<div><span class="status-dot checking" id="health-dot"></span><span id="health-text" style="font-size:.82rem">检查中...</span></div>
+</div></header>
+<div class="container">
+<div class="grid">
+<div class="card">
+<h2><i class="fas fa-key"></i> API 配置</h2>
+<label style="display:block;margin-bottom:.4rem;color:#aaa;font-size:.82rem">API 密钥</label>
+<div class="input-row">
+<input type="password" id="api-key" placeholder="输入 API 密钥">
+<button onclick="toggleKey()" style="width:auto"><i class="fas fa-eye"></i></button>
+<button onclick="saveKey()" style="width:auto"><i class="fas fa-save"></i></button>
+</div>
+<div class="info">API Base URL: <code id="api-url"></code></div>
+</div>
+<div class="card">
+<h2><i class="fas fa-list"></i> 可用模型</h2>
+<div class="grid" style="gap:.5rem">${modelCards}</div>
+</div>
+</div>
+<div class="card">
+<h2><i class="fas fa-plug"></i> API 端点</h2>
+<div class="ep"><span class="method">POST</span><code>/v1/chat/completions</code> — OpenAI Chat Completions</div>
+<div class="ep"><span class="method">POST</span><code>/v1/messages</code> — Anthropic Messages (Claude Code)</div>
+<div class="ep"><span class="method">POST</span><code>/v1/responses</code> — OpenAI Responses (Codex CLI)</div>
+<div class="ep"><span class="method">GET</span><code>/v1/models</code> — OpenAI 模型列表</div>
+<div class="ep"><span class="method">GET</span><code>/v1/models/{model}</code> — 单模型查询</div>
+<div class="ep"><span class="method">POST</span><code>/v1beta/models/{model}:generateContent</code> — Google 非流式</div>
+<div class="ep"><span class="method">POST</span><code>/v1beta/models/{model}:streamGenerateContent</code> — Google 流式</div>
+</div>
+<div class="card">
+<h2><i class="fas fa-terminal"></i> 实时交互终端</h2>
+<div class="input-row">
+<select id="model-select">${modelOpts}</select>
+<input type="text" id="prompt-input" placeholder="输入您的问题..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendRequest();}">
+<button id="send-btn" onclick="sendRequest()"><i class="fas fa-paper-plane"></i> 发送</button>
+</div>
+<div class="terminal" id="output-area"></div>
+</div>
+</div>
+<footer><p>gemini-web2api | 注意: 此服务依赖于第三方公开接口，请合理使用。</p></footer>
+<script>
+const API_BASE=window.location.origin+'/v1';
+document.getElementById('api-url').textContent=API_BASE;
+const sk=localStorage.getItem('gemini_api_key');if(sk)document.getElementById('api-key').value=sk;
+function getKey(){return document.getElementById('api-key').value.trim()||'sk-default'}
+function toggleKey(){const i=document.getElementById('api-key');i.type=i.type==='password'?'text':'password'}
+function saveKey(){localStorage.setItem('gemini_api_key',getKey())}
+function addOut(t,c){const a=document.getElementById('output-area');a.innerHTML+='<div class="'+c+'">'+t+'</div>';a.scrollTop=a.scrollHeight}
+async function sendRequest(){
+const p=document.getElementById('prompt-input').value.trim();if(!p)return;
+const m=document.getElementById('model-select').value;document.getElementById('prompt-input').value='';
+addOut('您: '+p,'user-msg');
+const b=document.getElementById('send-btn');b.disabled=true;b.innerHTML='<i class="fas fa-spinner fa-spin"></i> 处理中...';
+try{
+const r=await fetch(API_BASE+'/chat/completions',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+getKey()},body:JSON.stringify({model:m,messages:[{role:'user',content:p}],stream:true})});
+if(!r.ok){const e=await r.json().catch(()=>({error:{message:r.statusText}}));addOut('错误: '+(e.error?.message||JSON.stringify(e)),'error-msg');return}
+const rd=r.body.getReader();const dc=new TextDecoder();let at='';
+addOut('','assistant-msg');const ms=document.getElementById('output-area').getElementsByClassName('assistant-msg');const lm=ms[ms.length-1];
+while(true){const{done,value}=await rd.read();if(done)break;const tx=dc.decode(value);
+for(const l of tx.split('\\n')){if(!l.startsWith('data: ')||l==='data: [DONE]')continue;try{const d=JSON.parse(l.slice(6));const dl=d.choices?.[0]?.delta?.content||'';if(dl){at+=dl;lm.textContent='AI: '+at}}catch(e){}}}
+if(!at)lm.textContent='AI: (无响应)';
+}catch(e){addOut('网络错误: '+e.message,'error-msg')}
+finally{b.disabled=false;b.innerHTML='<i class="fas fa-paper-plane"></i> 发送'}
+}
+async function checkHealth(){
+const d=document.getElementById('health-dot');const t=document.getElementById('health-text');
+d.className='status-dot checking';t.textContent='检查中...';
+try{const r=await fetch(API_BASE+'/models',{headers:{'Authorization':'Bearer '+getKey()}});d.className='status-dot '+(r.ok?'healthy':'unhealthy');t.textContent=r.ok?'上游正常':'上游异常 ('+r.status+')'}
+catch(e){d.className='status-dot unhealthy';t.textContent='网络错误'}
+}
+checkHealth();setInterval(checkHealth,30000);
+</script>
+</body></html>`;
+
+  return new Response(html, {
+    status: 200,
+    headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' },
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
