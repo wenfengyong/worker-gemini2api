@@ -12,14 +12,14 @@
 
 - **可选密钥**: `api_keys` 为空时免密, 填入密钥后按 OpenAI Bearer Key 校验
 - **OpenAI 兼容**: 直接替换 `/v1/chat/completions` 和 `/v1/models`
-- **工具调用**: 完整的 Function Calling 支持 (OpenAI 格式)
+- **工具调用**: 完整的 Function Calling 支持 (OpenAI 格式 + Google 原生格式), 支持 `tool_choice` (none/auto/required/指定函数)
 - **多模型**: Flash, Flash Thinking (2万字+输出), Pro, Auto, Lite
 - **思考深度**: 通过 `@think=N` 后缀调节 (0=最深, 4=最浅)
 - **联网搜索**: 内置互联网访问 (Gemini 原生搜索能力)
-- **跨平台**: 纯 Python, 无外部依赖
+- **跨平台**: 纯 Python, 无外部依赖; 也支持 Cloudflare Workers 部署
 - **流式输出**: SSE Streaming 支持
-- **Codex CLI**: Responses API (`/v1/responses`) 兼容 OpenAI Codex
-- **Gemini CLI**: Google 原生 API (`/v1beta/models`) 兼容 Gemini CLI
+- **Codex CLI**: Responses API (`/v1/responses`) 兼容 OpenAI Codex, 支持流式和工具调用
+- **Gemini CLI**: Google 原生 API (`/v1beta/models`) 兼容 Gemini CLI, 支持 functionCall/functionResponse
 
 ## 快速开始
 

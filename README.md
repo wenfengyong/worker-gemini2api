@@ -48,10 +48,24 @@
 - ✅ **模型名称汉化**: 每个模型都有中文别名和描述。
 - ✅ **实时日志调试面板**: 在 Web UI 中记录并显示每次请求的 ID、状态、耗时、速率。
 - ✅ **全方位兼容**: 严格遵循 OpenAI API 格式，兼容主流客户端和沉浸式翻译等扩展。
+- ✅ **Responses API**: 支持 `/v1/responses` 端点，兼容 OpenAI Codex CLI，支持流式和工具调用。
+- ✅ **Google 原生 API**: 支持 `/v1beta/models` 及 `generateContent`/`streamGenerateContent` 端点，兼容 Gemini CLI。
+- ✅ **工具调用增强**: 完整支持 `tool_choice` (none/auto/required/指定函数)，支持 OpenAI 和 Google 两种函数调用格式。
 - ✅ **高性能与健壮性**: 利用 Worker 的边缘计算、HTTP/3、Brotli 压缩、背压处理。
 - ✅ **可观测性**: 每个请求都有唯一的 X-Worker-Trace-ID 用于追踪。
 
-## 完全包含所有必要的 HTML、CSS 和 JavaScript。您可以直接复制、粘贴、部署，无需任何额外构建步骤。代码已加密混淆，目的是为了防止cloudflare检测，确保长期使用
+## 支持的 API 端点
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/v1/chat/completions` | POST | OpenAI Chat Completions API |
+| `/v1/models` | GET | OpenAI 模型列表 |
+| `/v1/responses` | POST | OpenAI Responses API (Codex CLI) |
+| `/v1beta/models` | GET | Google Gemini 模型列表 |
+| `/v1beta/models/{model}:generateContent` | POST | Google 非流式生成 |
+| `/v1beta/models/{model}:streamGenerateContent` | POST | Google 流式生成 (SSE) |
+
+## 完全包含所有必要的 HTML、CSS 和 JavaScript。您可以直接复制、粘贴、部署，无需任何额外构建步骤。
 ## License
 
 MIT
