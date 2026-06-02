@@ -4,255 +4,76 @@
   <img src="logo.png" width="200" alt="gemini-web2api logo">
 </p>
 
-[中文文档](README_CN.md)
+### **部署与使用说明**
 
-Convert Google Gemini's web interface into an OpenAI-compatible API. Zero authentication, zero cost, cross-platform.
+1.  部署到 Cloudflare Workers:
+    ◦   登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)，进入 Workers & Pages。
 
-## Features
+    ◦   点击 创建应用程序 -> 创建 Worker。
 
-- **Optional API Keys**: no auth when `api_keys` is empty, OpenAI-style Bearer auth when configured
-- **OpenAI Compatible**: Drop-in replacement for `/v1/chat/completions` and `/v1/models`
-- **Tool Calling**: Full function calling support (OpenAI format)
-- **Multiple Models**: Flash, Flash Thinking (20k+ char output), Pro, Auto, Lite
-- **Thinking Depth**: Adjustable via `@think=N` suffix (0=deepest, 4=shallowest)
-- **Web Search**: Built-in internet access (Gemini's native search)
-- **Cross-Platform**: Pure Python, no dependencies beyond stdlib
-- **Streaming**: SSE streaming support
-- **Codex CLI**: Responses API (`/v1/responses`) for OpenAI Codex integration
-- **Gemini CLI**: Google native API (`/v1beta/models`) for Gemini CLI compatibility
+    ◦   将上述完整的 `_worker.js` 代码复制粘贴到在线编辑器中，替换默认内容。
 
-## Quick Start
+    ◦   点击 保存并部署。
 
-```bash
-python gemini_web2api.py
-```
 
-Server starts at `http://localhost:8081/v1`.
+2.  配置环境变量 (强烈推荐):
+    ◦   在 Worker 的 设置 -> 变量 中，添加以下环境变量：
 
-## Client Configuration
+        ▪   `API_MASTER_KEY`: 设置一个强密码，用作访问您 Worker API 的密钥。
 
-### Cherry Studio / ChatBox / any OpenAI client
+        ▪   `COOKIE_STRING` (可选): 如果您有来自 `gemini.google.com` 的 Cookie 字符串，可以在这里设置以获得更稳定的访问。格式如：`__Secure-1PSID=xxx; __Secure-1PSIDTS=yyy; ...`
 
-| Field | Value |
-|-------|-------|
-| Base URL | `http://localhost:8081/v1` |
-| API Key | any `api_keys` value from `config.json`; anything if not configured |
-| Model | `gemini-3.5-flash-thinking` |
+        ▪   `SAPISID` (可选): 如果提供了 `COOKIE_STRING`，可以单独提取 `SAPISID` 的值。
 
-### curl
+        ▪   其他如 `DEFAULT_MODEL`, `REQUEST_TIMEOUT_SEC` 等可根据需要调整。
 
-```bash
-curl http://localhost:8081/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk-your-key" \
-  -d '{"model":"gemini-3.5-flash","messages":[{"role":"user","content":"Hello!"}]}'
-```
 
-### OpenAI Python SDK
+3.  访问与使用:
+    ◦   部署成功后，访问您的 Worker 域名 (例如 `https://your-worker.your-subdomain.workers.dev/`)。
 
-```python
-from openai import OpenAI
-client = OpenAI(base_url="http://localhost:8081/v1", api_key="sk-your-key")
-resp = client.chat.completions.create(
-    model="gemini-3.5-flash-thinking",
-    messages=[{"role": "user", "content": "Explain quantum computing"}]
-)
-print(resp.choices[0].message.content)
-```
+    ◦   您将看到全中文的开发者驾驶舱。
 
-### Gemini CLI
+    ◦   在左侧“即用情报”面板中设置您的 `API_MASTER_KEY`。
 
-```bash
-export GEMINI_API_KEY=none
-export GOOGLE_GEMINI_BASE_URL=http://localhost:8081
-gemini
-```
+    ◦   在右侧“实时交互终端”中，即可开始与 Gemini 模型对话，并在下方实时查看请求日志和性能指标。
 
-Supports Google native API endpoints:
-- `GET /v1beta/models` — list models
-- `POST /v1beta/models/{model}:generateContent` — non-streaming
-- `POST /v1beta/models/{model}:streamGenerateContent` — streaming (SSE)
 
-## Available Models
+4.  在客户端中配置:
+    ◦   ChatGPT-Next-Web: 在设置中，将 接口地址 设置为 `https://your-worker.your-subdomain.workers.dev/v1`，API 密钥 设置为您的 `API_MASTER_KEY`。
 
-| Model | Description | Output |
-|-------|-------------|--------|
-| `gemini-3.5-flash` | Fast general-purpose | ~12k chars |
-| `gemini-3.5-flash-thinking` | Deep thinking, longest output | **~20k chars** |
-| `gemini-3.5-flash-thinking-lite` | Adaptive thinking depth | ~15k chars |
-| `gemini-3.1-pro` | Pro (needs cookie for real routing) | ~12k chars |
-| `gemini-auto` | Auto model selection | varies |
-| `gemini-flash-lite` | Lightweight fast | ~10k chars |
+    ◦   LobeChat: 添加自定义模型，接口地址填写 Worker 根路径，密钥同上。
 
-### Thinking Depth
+    ◦   cURL:
 
-Append `@think=N` to any model name:
+        bash
+        curl https://your-worker.your-subdomain.workers.dev/v1/chat/completions \
+          -H "Authorization: Bearer YOUR_API_MASTER_KEY" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "model": "gemini-3.5-flash",
+            "messages": [{"role": "user", "content": "你好"}]
+          }'
+        ```
 
-```
-gemini-3.5-flash-thinking@think=0   # deepest (default)
-gemini-3.5-flash-thinking@think=2   # medium
-gemini-3.5-flash-thinking@think=4   # shallowest
-```
+核心特性实现摘要
 
-## Optional: Cookie for Pro
+•   ✅ 完整后端逻辑迁移: 代理、认证、模型映射、流式处理、错误处理。
 
-Anonymous access works for all models, but `gemini-3.1-pro` routes to Flash without authentication. To get real Pro routing, provide a cookie file:
+•   ✅ 配置即代码: 所有配置集中于 CONFIG 对象，可通过环境变量覆盖。
 
-```bash
-python gemini_web2api.py --cookie-file cookie.txt
-```
+•   ✅ 开发者驾驶舱: 全中文界面，包含实时日志、性能洞察、一键复制、客户端配置指南。
 
-### How to get cookies
+•   ✅ 模型名称汉化: 每个模型都有中文别名和描述。
 
-1. Open Chrome, go to [gemini.google.com](https://gemini.google.com) and sign in with any free Google account
-2. Open DevTools (F12) → Application → Cookies → `https://gemini.google.com`
-3. Copy these cookie values: `SID`, `HSID`, `SSID`, `APISID`, `SAPISID`, `__Secure-1PSID`
-4. Create `cookie.txt` in this format:
+•   ✅ 实时日志调试面板: 在 Web UI 中记录并显示每次请求的 ID、状态、耗时、速率。
 
-```
-SID=your_sid_value; HSID=your_hsid_value; SSID=your_ssid_value; APISID=your_apisid_value; SAPISID=your_sapisid_value; __Secure-1PSID=your_1psid_value
-```
+•   ✅ 全方位兼容: 严格遵循 OpenAI API 格式，兼容主流客户端和沉浸式翻译等扩展。
 
-Or use the JSON format:
-```json
-{"cookie": "SID=xxx; HSID=xxx; SSID=xxx; APISID=xxx; SAPISID=xxx; __Secure-1PSID=xxx", "sapisid": "your_sapisid_value"}
-```
+•   ✅ 高性能与健壮性: 利用 Worker 的边缘计算、HTTP/3、Brotli 压缩、背压处理。
 
-**Alternative (browser extension)**: Use any "Export Cookies" extension to export cookies for `gemini.google.com` in Netscape format, then convert to the single-line format above.
+•   ✅ 可观测性: 每个请求都有唯一的 X-Worker-Trace-ID 用于追踪。
 
-### Authenticated account path and XSRF token
-
-If the signed-in Gemini page URL contains an account index, such as:
-
-```
-https://gemini.google.com/u/1/app/...
-```
-
-set `auth_user` to that index. Authenticated web requests may also require the page XSRF token. In the rendered Gemini page source, this token is exposed as `SNlM0e`; pass it as `xsrf_token` in `config.json`. The server sends it as the `at` form field.
-
-Example:
-
-```json
-{
-  "cookie_file": "/app/cookie.txt",
-  "auth_user": "1",
-  "xsrf_token": "AOOh0P...",
-  "gemini_bl": "boq_assistant-bard-web-server_YYYYMMDD.xx_p0"
-}
-```
-
-If authenticated requests return HTTP 400 with an `xsrf` error, refresh Gemini Web, update `xsrf_token`, and make sure `auth_user` matches the `/u/<index>/` part of the browser URL.
-
-No paid subscription needed — a free Google account is sufficient.
-
-## Configuration
-
-Create `config.json` in the same directory:
-
-```json
-{
-  "port": 8081,
-  "host": "0.0.0.0",
-  "retry_attempts": 3,
-  "retry_delay_sec": 2,
-  "request_timeout_sec": 180,
-  "gemini_bl": "boq_assistant-bard-web-server_20260525.09_p0",
-  "auth_user": null,
-  "xsrf_token": null,
-  "api_keys": ["sk-your-key"],
-  "cookie_file": null,
-  "proxy": null,
-  "log_requests": true
-}
-```
-
-When `api_keys` is `[]`, authentication is disabled. When one or more keys are set, `/v1/*` endpoints require `Authorization: Bearer <key>` or `x-api-key: <key>`.
-
-## Docker
-
-```bash
-cp config.example.json config.json
-docker build -t gemini-web2api .
-docker run -d --name gemini-web2api -p 8081:8081 -v ./config.json:/app/config.json gemini-web2api
-```
-
-Or use Docker Compose:
-
-```bash
-cp config.example.json config.json
-docker compose up -d
-```
-
-To mount a cookie file:
-
-```bash
-docker run -d --name gemini-web2api -p 8081:8081 -v ./config.json:/app/config.json -v ./cookie.txt:/app/cookie.txt gemini-web2api
-```
-
-Set `"cookie_file": "/app/cookie.txt"` in `config.json`.
-
-## Proxy
-
-If you cannot access `gemini.google.com` directly (connection timeout), configure a proxy:
-
-**Method 1: CLI argument**
-```bash
-python gemini_web2api.py --proxy http://127.0.0.1:7890
-```
-
-**Method 2: config.json**
-```json
-{"proxy": "http://127.0.0.1:7890"}
-```
-
-**Method 3: Environment variable** (auto-detected)
-```bash
-export HTTPS_PROXY=http://127.0.0.1:7890
-python gemini_web2api.py
-```
-
-Works with Clash, V2Ray, Shadowsocks, or any HTTP proxy.
-
-## Tool Calling
-
-```python
-resp = client.chat.completions.create(
-    model="gemini-3.5-flash",
-    messages=[{"role": "user", "content": "What's the weather in Tokyo?"}],
-    tools=[{
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Get weather for a city",
-            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}
-        }
-    }]
-)
-```
-
-## Limitations
-
-- **No image/multimodal input**: Gemini's image upload requires a proprietary streaming RPC protocol (WIZ/ProcessFile) that cannot be replicated in a standard HTTP proxy. Image inputs in messages will be ignored with a note.
-- **Not real Pro/Ultra**: Without a paid subscription cookie, `gemini-3.1-pro` routes to the same Flash model. The "Pro" label is a UI preference, not a backend model switch.
-- **Single-turn only**: Each request is an independent conversation. Multi-turn context is simulated by including previous messages in the prompt.
-- **Rate limits**: Google may throttle high-frequency requests. The server retries automatically but sustained heavy use may be blocked.
-
-## Requirements
-
-- Python 3.8+
-- No external dependencies (stdlib only)
-- Network access to `gemini.google.com` (proxy/VPN may be needed in some regions)
-
-## How It Works
-
-This tool reverse-engineers Google Gemini's web StreamGenerate protocol. It sends requests to the same endpoint that the Gemini web app uses, converting between OpenAI's API format and Gemini's internal protobuf-like format.
-
-The model selection is controlled by field `[79]` in the request payload, mapped from Gemini's frontend JavaScript source (`MODE_CATEGORY` enum).
-
-## Acknowledgments
-
-- Inspired by the open-source API proxy ecosystem
-
+这个 Worker 文件是完全自包含的，包含了所有必要的 HTML、CSS 和 JavaScript。您可以直接复制、粘贴、部署，无需任何额外构建步骤。请根据您的需求调整 CONFIG 中的
 ## License
 
 MIT
