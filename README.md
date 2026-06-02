@@ -28,7 +28,8 @@
 4.  在客户端中配置:
     ChatGPT-Next-Web: 在设置中，将 接口地址 设置为 `https://your-worker.your-subdomain.workers.dev/v1`，API 密钥 设置为您的 `API_MASTER_KEY`。
     LobeChat: 添加自定义模型，接口地址填写 Worker 根路径，密钥同上。
-    cURL:
+    ```
+	cURL:
         bash
         curl https://your-worker.your-subdomain.workers.dev/v1/chat/completions \
           -H "Authorization: Bearer YOUR_API_MASTER_KEY" \
