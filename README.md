@@ -1,4 +1,4 @@
-# gemini-web2api
+# gemini-web2api worker版
 
 <p align="center">
   <img src="logo.png" width="200" alt="gemini-web2api logo">
