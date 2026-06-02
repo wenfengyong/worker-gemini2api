@@ -572,6 +572,10 @@ function doGet(pathname, request) {
   }
 
   if (pathname === '/') {
+    return sendJson({ status: 'ok', version: '2.0.0', models: Object.keys(MODELS), endpoints: ['/v1/chat/completions', '/v1/messages', '/v1/responses', '/v1/models', '/v1beta/models'] }, 200);
+  }
+
+  if (pathname === '/dashboard' || pathname === '/admin') {
     return serveDashboard();
   }
 
