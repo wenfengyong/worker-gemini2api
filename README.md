@@ -51,7 +51,7 @@
 - ✅ **高性能与健壮性**: 利用 Worker 的边缘计算、HTTP/3、Brotli 压缩、背压处理。
 - ✅ **可观测性**: 每个请求都有唯一的 X-Worker-Trace-ID 用于追踪。
 
-## 这个 Worker 文件是完全自包含的，包含了所有必要的 HTML、CSS 和 JavaScript。您可以直接复制、粘贴、部署，无需任何额外构建步骤。
+## 完全包含所有必要的 HTML、CSS 和 JavaScript。您可以直接复制、粘贴、部署，无需任何额外构建步骤。代码已加密混淆，目的是为了防止cloudflare检测，确保长期使用
 ## License
 
 MIT
