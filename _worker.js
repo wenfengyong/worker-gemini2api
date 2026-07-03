@@ -785,12 +785,16 @@ async function handleChatStream(prompt, model, cid, now, traceId) {
         const upstream = await generateStream(prompt, model.mode, model.think, model.extra, traceId);
         const reader = upstream.getReader();
         let prevText = '';
+        let buf = '';
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           const decoded = new TextDecoder().decode(value);
-          // Python: for line in buf.split("\n"): for t in _extract_texts_from_line(line):
-          for (const line of decoded.split('\n')) {
+          buf += decoded;
+          while (buf.includes('\n')) {
+            const idx = buf.indexOf('\n');
+            const line = buf.slice(0, idx);
+            buf = buf.slice(idx + 1);
             for (const t of extractTextsFromLine(line)) {
               if (t.length > prevText.length) {
                 const delta = cleanText(t.slice(prevText.length));
@@ -800,6 +804,19 @@ async function handleChatStream(prompt, model, cid, now, traceId) {
                 }
                 prevText = t;
               }
+            }
+          }
+        }
+        // Flush remaining buffer
+        if (buf.trim()) {
+          for (const t of extractTextsFromLine(buf)) {
+            if (t.length > prevText.length) {
+              const delta = cleanText(t.slice(prevText.length));
+              if (delta) {
+                const chunk = { id: cid, object: 'chat.completion.chunk', created: now, model: model.name, choices: [{ index: 0, delta: { content: delta }, finish_reason: null }] };
+                controller.enqueue(encoder.encode('data: ' + JSON.stringify(chunk) + '\n\n'));
+              }
+              prevText = t;
             }
           }
         }
@@ -1148,12 +1165,17 @@ async function handleAnthropicStream(prompt, model, msgId, traceId) {
         const reader = upstream.getReader();
         let prevText = '';
         let totalOutputTokens = 0;
+        let buf = '';
 
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           const decoded = new TextDecoder().decode(value);
-          for (const line of decoded.split('\n')) {
+          buf += decoded;
+          while (buf.includes('\n')) {
+            const idx = buf.indexOf('\n');
+            const line = buf.slice(0, idx);
+            buf = buf.slice(idx + 1);
             for (const t of extractTextsFromLine(line)) {
               if (t.length > prevText.length) {
                 const delta = cleanText(t.slice(prevText.length));
@@ -1163,6 +1185,19 @@ async function handleAnthropicStream(prompt, model, msgId, traceId) {
                 }
                 prevText = t;
               }
+            }
+          }
+        }
+        // Flush remaining buffer
+        if (buf.trim()) {
+          for (const t of extractTextsFromLine(buf)) {
+            if (t.length > prevText.length) {
+              const delta = cleanText(t.slice(prevText.length));
+              if (delta) {
+                totalOutputTokens += Math.floor(delta.length / 4);
+                emit('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: delta } });
+              }
+              prevText = t;
             }
           }
         }
@@ -1307,11 +1342,16 @@ async function handleGoogleStream(prompt, model, traceId) {
         const upstream = await generateStream(prompt, model.mode, model.think, model.extra, traceId);
         const reader = upstream.getReader();
         let fullText = '';
+        let buf = '';
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           const decoded = new TextDecoder().decode(value);
-          for (const line of decoded.split('\n')) {
+          buf += decoded;
+          while (buf.includes('\n')) {
+            const idx = buf.indexOf('\n');
+            const line = buf.slice(0, idx);
+            buf = buf.slice(idx + 1);
             for (const t of extractTextsFromLine(line)) {
               if (t.length > fullText.length) {
                 const delta = cleanText(t.slice(fullText.length));
@@ -1323,6 +1363,20 @@ async function handleGoogleStream(prompt, model, traceId) {
                 // Update fullText to the full upstream text (not just delta)
                 fullText = t.length > fullText.length ? t : fullText;
               }
+            }
+          }
+        }
+        // Flush remaining buffer
+        if (buf.trim()) {
+          for (const t of extractTextsFromLine(buf)) {
+            if (t.length > fullText.length) {
+              const delta = cleanText(t.slice(fullText.length));
+              if (delta) {
+                fullText += delta;
+                const chunkObj = { candidates: [{ content: { parts: [{ text: delta }], role: 'model' }, index: 0 }], modelVersion: model.name };
+                controller.enqueue(encoder.encode('data: ' + JSON.stringify(chunkObj) + '\n\n'));
+              }
+              fullText = t.length > fullText.length ? t : fullText;
             }
           }
         }
