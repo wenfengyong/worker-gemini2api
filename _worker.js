@@ -1145,6 +1145,20 @@ function anthropicMessagesToPrompt(req) {
     }
   }
 
+  // Build a lookup from tool_use_id -> tool name so tool_result blocks
+  // can reference the tool name instead of an opaque ID that the model
+  // cannot resolve.
+  const toolNameById = {};
+  for (const msg of (req.messages || [])) {
+    if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block.type === 'tool_use' && block.id && block.name) {
+          toolNameById[block.id] = block.name;
+        }
+      }
+    }
+  }
+
   // Messages
   for (const msg of (req.messages || [])) {
     const role = msg.role;
@@ -1158,13 +1172,14 @@ function anthropicMessagesToPrompt(req) {
         for (const block of content) {
           if (block.type === 'text') textParts.push(block.text || '');
           else if (block.type === 'tool_result') {
-            // tool_result: convert to [Tool result for ...]
+            // tool_result: resolve tool name from ID for model comprehension
             let resultText = '';
             if (typeof block.content === 'string') resultText = block.content;
             else if (Array.isArray(block.content)) {
               resultText = block.content.filter(b => b.type === 'text').map(b => b.text || '').join(' ');
             }
-            parts.push(`[Tool result for ${block.tool_use_id || ''}]: ${resultText}`);
+            const toolName = toolNameById[block.tool_use_id] || block.tool_use_id || 'unknown';
+            parts.push(`[Tool result for ${toolName}]: ${resultText}`);
           } else if (block.type === 'image') {
             textParts.push('[Note: Image input not supported. Please describe the image in text.]');
           }
@@ -1178,7 +1193,7 @@ function anthropicMessagesToPrompt(req) {
         const textParts = [];
         const tcStrs = [];
         for (const block of content) {
-          if (block.type === 'text') textParts.push(block.text || '');
+          if (block.type === 'text' && block.text) textParts.push(block.text);
           else if (block.type === 'tool_use') {
             tcStrs.push('```tool_call\n{"name": "' + (block.name || '') + '", "arguments": ' + JSON.stringify(block.input || {}) + '}\n```');
           }
@@ -1194,12 +1209,16 @@ function anthropicMessagesToPrompt(req) {
 
 // Convert parsed tool_calls to Anthropic tool_use content blocks
 function toAnthropicToolUse(toolCalls) {
-  return toolCalls.map(tc => ({
-    type: 'tool_use',
-    id: tc.id,
-    name: tc.function.name,
-    input: JSON.parse(tc.function.arguments || '{}'),
-  }));
+  return toolCalls.map(tc => {
+    let input = {};
+    try { input = JSON.parse(tc.function.arguments || '{}'); } catch (e) { input = {}; }
+    return {
+      type: 'tool_use',
+      id: tc.id,
+      name: tc.function.name,
+      input: input,
+    };
+  });
 }
 
 // Build Anthropic non-streaming response
