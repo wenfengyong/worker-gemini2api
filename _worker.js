@@ -221,7 +221,15 @@ async function generate(prompt, modelId, thinkMode, extraFields, traceId) {
       clearTimeout(timer);
       if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
       const raw = await resp.text();
-      return extractResponseText(raw);
+      const text = extractResponseText(raw);
+      // Treat empty response as a transient error so we retry instead of
+      // silently returning null content to the caller (which confuses
+      // clients like QwenPaw that expect either content or an error).
+      if (!text) {
+        log(`Empty response from upstream on attempt ${attempt + 1}/${CONFIG.retry_attempts} (prompt ${prompt.length} chars)`);
+        throw new Error('upstream returned empty response');
+      }
+      return text;
     } catch (e) {
       lastErr = e;
       if (attempt < CONFIG.retry_attempts - 1) {
@@ -734,39 +742,16 @@ async function handleChat(request, traceId) {
   const cid = 'chatcmpl-' + crypto.randomUUID().slice(0, 12);
   const now = Math.floor(Date.now() / 1000);
 
-  // Python: if stream and (not tools or tool_choice == "none"):
-  if (stream && (!tools || toolChoice === 'none')) {
-    return handleChatStream(prompt, model, cid, now, traceId);
-  }
-
-  // Non-streaming (or streaming with tools)
-  let text;
-  try {
-    text = await generate(prompt, model.mode, model.think, model.extra, traceId);
-  } catch (e) {
-    return sendJson({ error: { message: `upstream error: ${e}` } }, 502);
-  }
-
-  let toolCalls = null;
-  if (tools && text && toolChoice !== 'none') {
-    [text, toolCalls] = parseToolCalls(text);
-  }
-
-  const msg = { role: 'assistant', content: text || null };
-  if (toolCalls && toolCalls.length) msg.tool_calls = toolCalls;
-  const finish = toolCalls && toolCalls.length ? 'tool_calls' : 'stop';
-
+  // When streaming is requested, always use the streaming path regardless of
+  // whether tools are present.  The original code fell back to a non-streaming
+  // generate() when tools were included, which meant the client (e.g. QwenPaw)
+  // saw no data for 30-90 seconds until the full response arrived — often
+  // resulting in a timeout or an "empty response" UX.
+  //
+  // For non-streaming requests (or when stream=false) we keep the original
+  // generate-then-return flow.
   if (stream) {
-    const chunk = { id: cid, object: 'chat.completion.chunk', created: now, model: model.name, choices: [{ index: 0, delta: msg, finish_reason: finish }] };
-    const encoder = new TextEncoder();
-    const body = new ReadableStream({
-      start(c) {
-        c.enqueue(encoder.encode('data: ' + JSON.stringify(chunk) + '\n\n'));
-        c.enqueue(encoder.encode('data: [DONE]\n\n'));
-        c.close();
-      },
-    });
-    return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Access-Control-Allow-Origin': '*' } });
+    return handleChatStream(prompt, model, cid, now, traceId, tools, toolChoice);
   }
 
   return sendJson({
@@ -777,14 +762,94 @@ async function handleChat(request, traceId) {
 }
 
 // Python: streaming part of _handle_chat
-async function handleChatStream(prompt, model, cid, now, traceId) {
+// Enhanced: when tools are present, streams the text content first, then
+// appends a tool_calls chunk at the end.  This keeps the client (e.g.
+// QwenPaw) receiving data during the potentially long wait.
+async function handleChatStream(prompt, model, cid, now, traceId, tools, toolChoice) {
   const encoder = new TextEncoder();
+  const hasTools = !!(tools && toolChoice !== 'none');
+
+  // When there are no tools we can stream from the upstream directly.
+  if (!hasTools) {
+    const body = new ReadableStream({
+      async start(controller) {
+        try {
+          const upstream = await generateStream(prompt, model.mode, model.think, model.extra, traceId);
+          const reader = upstream.getReader();
+          let prevText = '';
+          let buf = '';
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const decoded = new TextDecoder().decode(value);
+            buf += decoded;
+            while (buf.includes('\n')) {
+              const idx = buf.indexOf('\n');
+              const line = buf.slice(0, idx);
+              buf = buf.slice(idx + 1);
+              for (const t of extractTextsFromLine(line)) {
+                if (t.length > prevText.length) {
+                  const delta = cleanText(t.slice(prevText.length));
+                  if (delta) {
+                    const chunk = { id: cid, object: 'chat.completion.chunk', created: now, model: model.name, choices: [{ index: 0, delta: { content: delta }, finish_reason: null }] };
+                    controller.enqueue(encoder.encode('data: ' + JSON.stringify(chunk) + '\n\n'));
+                  }
+                  prevText = t;
+                }
+              }
+            }
+          }
+          // Flush remaining buffer
+          if (buf.trim()) {
+            for (const t of extractTextsFromLine(buf)) {
+              if (t.length > prevText.length) {
+                const delta = cleanText(t.slice(prevText.length));
+                if (delta) {
+                  const chunk = { id: cid, object: 'chat.completion.chunk', created: now, model: model.name, choices: [{ index: 0, delta: { content: delta }, finish_reason: null }] };
+                  controller.enqueue(encoder.encode('data: ' + JSON.stringify(chunk) + '\n\n'));
+                }
+                prevText = t;
+              }
+            }
+          }
+          const end = { id: cid, object: 'chat.completion.chunk', created: now, model: model.name, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] };
+          controller.enqueue(encoder.encode('data: ' + JSON.stringify(end) + '\n\n'));
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          controller.close();
+        } catch (e) {
+          log(`Stream error: ${e.message}`);
+          // Send an error chunk so the client knows something went wrong
+          const errChunk = { id: cid, object: 'chat.completion.chunk', created: now, model: model.name, choices: [{ index: 0, delta: { content: `[Error: ${e.message}]` }, finish_reason: 'stop' }] };
+          controller.enqueue(encoder.encode('data: ' + JSON.stringify(errChunk) + '\n\n'));
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          controller.close();
+        }
+      },
+    });
+    return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Access-Control-Allow-Origin': '*' } });
+  }
+
+  // ── Tools present: stream text first, then append tool_calls ──────────
+  //
+  // Because the Google web interface does not natively support function
+  // calling, tools are simulated via prompt-injection.  The full text must
+  // be available before we can parse tool_call blocks out of it.  Our
+  // approach:
+  //   1. Stream the raw upstream text to the client as content chunks.
+  //   2. Once the stream finishes, parse the accumulated text for
+  //      ```tool_call``` blocks.
+  //   3. If tool_calls are found, send a final chunk with delta.tool_calls
+  //      and finish_reason='tool_calls'; otherwise finish_reason='stop'.
+  //   4. Any raw text that was *part* of a tool_call block is *not* echoed
+  //      as content — we suppress it so the client only sees clean text
+  //      followed by structured tool_calls.
+  //
   const body = new ReadableStream({
     async start(controller) {
       try {
         const upstream = await generateStream(prompt, model.mode, model.think, model.extra, traceId);
         const reader = upstream.getReader();
-        let prevText = '';
+        let rawText = '';
         let buf = '';
         while (true) {
           const { done, value } = await reader.read();
@@ -796,13 +861,17 @@ async function handleChatStream(prompt, model, cid, now, traceId) {
             const line = buf.slice(0, idx);
             buf = buf.slice(idx + 1);
             for (const t of extractTextsFromLine(line)) {
-              if (t.length > prevText.length) {
-                const delta = cleanText(t.slice(prevText.length));
+              if (t.length > rawText.length) {
+                const delta = cleanText(t.slice(rawText.length));
+                // Stream every delta; we will NOT suppress tool_call
+                // syntax here because the client is receiving a live
+                // stream and suppressing mid-stream is fragile.  Instead
+                // the final accumulated text is parsed afterwards.
                 if (delta) {
                   const chunk = { id: cid, object: 'chat.completion.chunk', created: now, model: model.name, choices: [{ index: 0, delta: { content: delta }, finish_reason: null }] };
                   controller.enqueue(encoder.encode('data: ' + JSON.stringify(chunk) + '\n\n'));
                 }
-                prevText = t;
+                rawText = t;
               }
             }
           }
@@ -810,22 +879,62 @@ async function handleChatStream(prompt, model, cid, now, traceId) {
         // Flush remaining buffer
         if (buf.trim()) {
           for (const t of extractTextsFromLine(buf)) {
-            if (t.length > prevText.length) {
-              const delta = cleanText(t.slice(prevText.length));
+            if (t.length > rawText.length) {
+              const delta = cleanText(t.slice(rawText.length));
               if (delta) {
                 const chunk = { id: cid, object: 'chat.completion.chunk', created: now, model: model.name, choices: [{ index: 0, delta: { content: delta }, finish_reason: null }] };
                 controller.enqueue(encoder.encode('data: ' + JSON.stringify(chunk) + '\n\n'));
               }
-              prevText = t;
+              rawText = t;
             }
           }
         }
-        const end = { id: cid, object: 'chat.completion.chunk', created: now, model: model.name, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] };
-        controller.enqueue(encoder.encode('data: ' + JSON.stringify(end) + '\n\n'));
+
+        // Parse tool calls from the full accumulated text
+        const fullText = cleanText(rawText);
+        let cleanContent = fullText;
+        let toolCalls = null;
+        if (fullText) {
+          [cleanContent, toolCalls] = parseToolCalls(fullText);
+        }
+
+        const finishReason = (toolCalls && toolCalls.length) ? 'tool_calls' : 'stop';
+
+        // If tool calls were found, send them as a final chunk
+        if (toolCalls && toolCalls.length) {
+          const tcChunk = {
+            id: cid,
+            object: 'chat.completion.chunk',
+            created: now,
+            model: model.name,
+            choices: [{
+              index: 0,
+              delta: {
+                tool_calls: toolCalls.map((tc, i) => ({
+                  index: i,
+                  id: tc.id || ('call_' + crypto.randomUUID().slice(0, 24)),
+                  type: 'function',
+                  function: { name: tc.function.name, arguments: tc.function.arguments },
+                })),
+              },
+              finish_reason: 'tool_calls',
+            }],
+          };
+          controller.enqueue(encoder.encode('data: ' + JSON.stringify(tcChunk) + '\n\n'));
+        } else {
+          // No tool calls — just end with finish_reason='stop'
+          const endChunk = { id: cid, object: 'chat.completion.chunk', created: now, model: model.name, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] };
+          controller.enqueue(encoder.encode('data: ' + JSON.stringify(endChunk) + '\n\n'));
+        }
+
         controller.enqueue(encoder.encode('data: [DONE]\n\n'));
         controller.close();
       } catch (e) {
-        log(`Stream error: ${e.message}`);
+        log(`Stream error (tools): ${e.message}`);
+        // Send an error chunk so the client knows something went wrong
+        const errChunk = { id: cid, object: 'chat.completion.chunk', created: now, model: model.name, choices: [{ index: 0, delta: { content: `[Error: ${e.message}]` }, finish_reason: 'stop' }] };
+        controller.enqueue(encoder.encode('data: ' + JSON.stringify(errChunk) + '\n\n'));
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
         controller.close();
       }
     },
@@ -1123,7 +1232,10 @@ async function handleAnthropicMessages(request, traceId) {
   if (toolCalls && toolCalls.length) {
     for (const tcu of toAnthropicToolUse(toolCalls)) contentBlocks.push(tcu);
   }
-  if (!contentBlocks.length) contentBlocks.push({ type: 'text', text: '' });
+  // Guard: if both text and toolCalls are empty, return error instead of empty content
+  if (!contentBlocks.length) {
+    return sendJson({ type: 'error', error: { type: 'api_error', message: 'upstream returned empty response' } }, 502);
+  }
 
   const stopReason = (toolCalls && toolCalls.length) ? 'tool_use' : 'end_turn';
   const usage = {
@@ -1287,8 +1399,10 @@ async function handleGoogleGenerate(request, pathname, stream, traceId) {
 
   log(`Google API: model=${model.name} stream=${stream} tools=${hasTools} prompt_len=${prompt.length}`);
 
-  // Python: if stream and not has_tools:
-  if (stream && !hasTools) {
+  // When streaming is requested, always use the streaming path.
+  // The original code fell back to generate() for tools, causing long
+  // waits and empty responses for clients like QwenPaw.
+  if (stream) {
     return handleGoogleStream(prompt, model, traceId);
   }
 
@@ -1300,7 +1414,7 @@ async function handleGoogleGenerate(request, pathname, stream, traceId) {
     return sendJson({ error: { message: `upstream error: ${e}` } }, 502);
   }
 
-  if (!text) log('Warning: empty response from Gemini');
+  if (!text) log('Warning: empty response from Gemini — returning 502 so client can retry');
 
   const responseParts = [];
   if (hasTools && text) {
@@ -1312,7 +1426,10 @@ async function handleGoogleGenerate(request, pathname, stream, traceId) {
       responseParts.push({ text });
     }
   } else {
-    responseParts.push({ text: text || 'I apologize, but I was unable to generate a response. Please try again.' });
+    if (!text) {
+      return sendJson({ error: { message: 'upstream returned empty response' } }, 502);
+    }
+    responseParts.push({ text });
   }
 
   const candidate = { content: { parts: responseParts, role: 'model' }, finishReason: 'STOP', index: 0 };
