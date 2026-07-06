@@ -161,7 +161,9 @@ function buildPayload(prompt, modelId, thinkMode, extraFields) {
 
 // Python: _get_url() -> str
 function getUrl() {
-  const reqid = Math.floor(Date.now() / 1000) % 1000000;
+  // Use a more unique reqid to avoid collisions when multiple requests
+  // land in the same second — duplicate reqids can trigger 405 from Google.
+  const reqid = (Math.floor(Date.now() / 1000) * 1000 + Math.floor(Math.random() * 1000)) % 1000000;
   const prefix = accountPrefix();
   return `https://gemini.google.com${prefix}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl=${CONFIG.gemini_bl}&hl=en&_reqid=${reqid}&rt=c`;
 }
@@ -209,11 +211,13 @@ function extractResponseText(raw) {
 
 // Python: generate(prompt, model_id, think_mode, file_refs, extra_fields) -> str
 async function generate(prompt, modelId, thinkMode, extraFields, traceId) {
-  const body = buildPayload(prompt, modelId, thinkMode, extraFields);
-  const url = getUrl();
   let lastErr = null;
   for (let attempt = 0; attempt < CONFIG.retry_attempts; attempt++) {
     try {
+      // Rebuild body/url/headers on each attempt — payload contains a UUID
+      // and URL contains _reqid; reusing stale values can cause 405.
+      const body = buildPayload(prompt, modelId, thinkMode, extraFields);
+      const url = getUrl();
       const headers = await buildHeaders();
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), CONFIG.request_timeout_sec * 1000);
@@ -244,15 +248,34 @@ async function generate(prompt, modelId, thinkMode, extraFields, traceId) {
 // Python: generate_stream(prompt, model_id, think_mode, file_refs, extra_fields) -> yields delta
 // Returns the upstream ReadableStream for the caller to consume
 async function generateStream(prompt, modelId, thinkMode, extraFields, traceId) {
-  const body = buildPayload(prompt, modelId, thinkMode, extraFields);
-  const url = getUrl();
-  const headers = await buildHeaders();
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), CONFIG.request_timeout_sec * 1000);
-  const resp = await fetch(url, { method: 'POST', headers, body, signal: ctrl.signal });
-  clearTimeout(timer);
-  if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
-  return resp.body;
+  // Same retry logic as generate() — Google's web interface occasionally
+  // returns transient errors (405, 429, etc.) that succeed on retry.
+  let lastErr = null;
+  for (let attempt = 0; attempt < CONFIG.retry_attempts; attempt++) {
+    try {
+      // Rebuild body/url/headers on each attempt for the same reason as generate()
+      const body = buildPayload(prompt, modelId, thinkMode, extraFields);
+      const url = getUrl();
+      const headers = await buildHeaders();
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), CONFIG.request_timeout_sec * 1000);
+      const resp = await fetch(url, { method: 'POST', headers, body, signal: ctrl.signal });
+      clearTimeout(timer);
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+      }
+      // Check that the response body is actually a valid stream
+      // (Google sometimes returns an OK status but with an error body)
+      return resp.body;
+    } catch (e) {
+      lastErr = e;
+      if (attempt < CONFIG.retry_attempts - 1) {
+        log(`Stream retry ${attempt + 1}/${CONFIG.retry_attempts}: ${e.message}`);
+        await new Promise(r => setTimeout(r, CONFIG.retry_delay_sec * 1000));
+      }
+    }
+  }
+  throw lastErr;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
