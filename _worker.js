@@ -601,6 +601,7 @@ function serveDashboard() {
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>gemini-web2api</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Mono','SF Mono','Consolas',monospace;background:#121212;color:#e0e0e0;line-height:1.6}
@@ -621,7 +622,18 @@ button{background:#ffbf00;color:#000;border:none;padding:.4rem .8rem;border-radi
 button:hover{background:#e6ac00}button:disabled{opacity:.5;cursor:not-allowed}
 .terminal{background:#0a0a0a;border:1px solid #333;border-radius:8px;padding:1rem;min-height:280px;max-height:480px;overflow-y:auto;font-size:.82rem;white-space:pre-wrap;word-break:break-all}
 .terminal::-webkit-scrollbar{width:6px}.terminal::-webkit-scrollbar-thumb{background:#555;border-radius:3px}
-.user-msg{color:#10b981}.assistant-msg{color:#e0e0e0}.error-msg{color:#ef4444}
+.user-msg{color:#10b981}.assistant-msg{color:#e0e0e0;white-space:normal}.error-msg{color:#ef4444}
+.assistant-msg pre{background:#0a0a0a;border:1px solid #333;border-radius:4px;padding:.5rem;overflow-x:auto;margin:.4rem 0}
+.assistant-msg code{background:#2a2a2a;padding:.1rem .3rem;border-radius:3px;font-size:.8rem}
+.assistant-msg pre code{background:transparent;padding:0;border:none}
+.assistant-msg table{border-collapse:collapse;margin:.4rem 0}
+.assistant-msg th,.assistant-msg td{border:1px solid #444;padding:.3rem .5rem}
+.assistant-msg img{max-width:100%;border-radius:4px}
+.assistant-msg ul,.assistant-msg ol{padding-left:1.4rem}
+.assistant-msg blockquote{border-left:3px solid #ffbf00;margin:.4rem 0;padding:0 .8rem;color:#aaa}
+.assistant-msg h1,.assistant-msg h2,.assistant-msg h3,.assistant-msg h4{margin:.6rem 0 .3rem;color:#ffbf00}
+.assistant-msg p{margin:.3rem 0}
+.assistant-msg hr{border:none;border-top:1px solid #333;margin:.6rem 0}
 .info{color:#888;font-size:.78rem;margin-top:.4rem}
 footer{text-align:center;padding:1.5rem 0;color:#666;font-size:.78rem}
 a{color:#ffbf00;text-decoration:none}a:hover{text-decoration:underline}
@@ -682,6 +694,7 @@ function getKey(){return document.getElementById('api-key').value.trim()||'sk-de
 function toggleKey(){const i=document.getElementById('api-key');i.type=i.type==='password'?'text':'password'}
 function saveKey(){localStorage.setItem('gemini_api_key',getKey())}
 function addOut(t,c){const a=document.getElementById('output-area');a.innerHTML+='<div class="'+c+'">'+t+'</div>';a.scrollTop=a.scrollHeight}
+function renderMd(t){if(!t)return'';const safe=t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');if(!window.marked)return safe;try{return marked.parse(safe,{breaks:true})}catch(e){return safe}}
 async function sendRequest(){
 const p=document.getElementById('prompt-input').value.trim();if(!p)return;
 const m=document.getElementById('model-select').value;document.getElementById('prompt-input').value='';
@@ -693,7 +706,7 @@ if(!r.ok){const e=await r.json().catch(()=>({error:{message:r.statusText}}));add
 const rd=r.body.getReader();const dc=new TextDecoder();let at='';
 addOut('','assistant-msg');const ms=document.getElementById('output-area').getElementsByClassName('assistant-msg');const lm=ms[ms.length-1];
 while(true){const{done,value}=await rd.read();if(done)break;const tx=dc.decode(value);
-for(const l of tx.split('\\n')){if(!l.startsWith('data: ')||l==='data: [DONE]')continue;try{const d=JSON.parse(l.slice(6));const dl=d.choices?.[0]?.delta?.content||'';if(dl){at+=dl;lm.textContent='AI: '+at}}catch(e){}}}
+for(const l of tx.split('\\n')){if(!l.startsWith('data: ')||l==='data: [DONE]')continue;try{const d=JSON.parse(l.slice(6));const dl=d.choices?.[0]?.delta?.content||'';if(dl){at+=dl;lm.innerHTML='AI: '+renderMd(at)}}catch(e){}}}
 if(!at)lm.textContent='AI: (无响应)';
 }catch(e){addOut('网络错误: '+e.message,'error-msg')}
 finally{b.disabled=false;b.innerHTML='<i class="fas fa-paper-plane"></i> 发送'}
