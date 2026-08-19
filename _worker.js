@@ -20,6 +20,11 @@ const CONFIG = {
   api_keys: [],
 };
 
+// Finalize the SSE stream after no new text for this long.
+// The Gemini upstream may keep the connection open after generation, so we
+// cannot rely on it closing to terminate the stream.
+const STREAM_IDLE_MS = 12000;
+
 function loadConfigFromEnv(env) {
   const M = {
     retry_attempts: 'number', retry_delay_sec: 'number', request_timeout_sec: 'number',
@@ -799,8 +804,13 @@ async function handleChatStream(prompt, model, cid, now, traceId) {
         const reader = upstream.getReader();
         let prevText = '';
         let buf = '';
+        let gotDelta = false;
+        let lastDeltaAt = Date.now();
         while (true) {
-          const { done, value } = await reader.read();
+          const timeoutMs = gotDelta ? STREAM_IDLE_MS : CONFIG.request_timeout_sec * 1000;
+          const res = await Promise.race([reader.read(), new Promise(r => setTimeout(() => r({ __timedout: true }), timeoutMs))]);
+          if (res.__timedout) break;
+          const { done, value } = res;
           if (done) break;
           const decoded = new TextDecoder().decode(value);
           buf += decoded;
@@ -812,6 +822,7 @@ async function handleChatStream(prompt, model, cid, now, traceId) {
               if (t.length > prevText.length) {
                 const delta = cleanText(t.slice(prevText.length));
                 if (delta) {
+                  gotDelta = true; lastDeltaAt = Date.now();
                   const chunk = { id: cid, object: 'chat.completion.chunk', created: now, model: model.name, choices: [{ index: 0, delta: { content: delta }, finish_reason: null }] };
                   controller.enqueue(encoder.encode('data: ' + JSON.stringify(chunk) + '\n\n'));
                 }
@@ -819,6 +830,7 @@ async function handleChatStream(prompt, model, cid, now, traceId) {
               }
             }
           }
+          if (gotDelta && Date.now() - lastDeltaAt > STREAM_IDLE_MS) break;
         }
         // Flush remaining buffer
         if (buf.trim()) {
@@ -1179,9 +1191,14 @@ async function handleAnthropicStream(prompt, model, msgId, traceId) {
         let prevText = '';
         let totalOutputTokens = 0;
         let buf = '';
+        let gotDelta = false;
+        let lastDeltaAt = Date.now();
 
         while (true) {
-          const { done, value } = await reader.read();
+          const timeoutMs = gotDelta ? STREAM_IDLE_MS : CONFIG.request_timeout_sec * 1000;
+          const res = await Promise.race([reader.read(), new Promise(r => setTimeout(() => r({ __timedout: true }), timeoutMs))]);
+          if (res.__timedout) break;
+          const { done, value } = res;
           if (done) break;
           const decoded = new TextDecoder().decode(value);
           buf += decoded;
@@ -1193,6 +1210,7 @@ async function handleAnthropicStream(prompt, model, msgId, traceId) {
               if (t.length > prevText.length) {
                 const delta = cleanText(t.slice(prevText.length));
                 if (delta) {
+                  gotDelta = true; lastDeltaAt = Date.now();
                   totalOutputTokens += Math.floor(delta.length / 4);
                   emit('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: delta } });
                 }
@@ -1200,6 +1218,7 @@ async function handleAnthropicStream(prompt, model, msgId, traceId) {
               }
             }
           }
+          if (gotDelta && Date.now() - lastDeltaAt > STREAM_IDLE_MS) break;
         }
         // Flush remaining buffer
         if (buf.trim()) {
@@ -1356,8 +1375,13 @@ async function handleGoogleStream(prompt, model, traceId) {
         const reader = upstream.getReader();
         let fullText = '';
         let buf = '';
+        let gotDelta = false;
+        let lastDeltaAt = Date.now();
         while (true) {
-          const { done, value } = await reader.read();
+          const timeoutMs = gotDelta ? STREAM_IDLE_MS : CONFIG.request_timeout_sec * 1000;
+          const res = await Promise.race([reader.read(), new Promise(r => setTimeout(() => r({ __timedout: true }), timeoutMs))]);
+          if (res.__timedout) break;
+          const { done, value } = res;
           if (done) break;
           const decoded = new TextDecoder().decode(value);
           buf += decoded;
@@ -1369,6 +1393,7 @@ async function handleGoogleStream(prompt, model, traceId) {
               if (t.length > fullText.length) {
                 const delta = cleanText(t.slice(fullText.length));
                 if (delta) {
+                  gotDelta = true; lastDeltaAt = Date.now();
                   fullText += delta;
                   const chunkObj = { candidates: [{ content: { parts: [{ text: delta }], role: 'model' }, index: 0 }], modelVersion: model.name };
                   controller.enqueue(encoder.encode('data: ' + JSON.stringify(chunkObj) + '\n\n'));
@@ -1378,6 +1403,7 @@ async function handleGoogleStream(prompt, model, traceId) {
               }
             }
           }
+          if (gotDelta && Date.now() - lastDeltaAt > STREAM_IDLE_MS) break;
         }
         // Flush remaining buffer
         if (buf.trim()) {
